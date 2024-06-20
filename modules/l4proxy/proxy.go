@@ -27,10 +27,10 @@ import (
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
-	"github.com/mastercactapus/proxyprotocol"
 	"github.com/mholt/caddy-l4/layer4"
 	"github.com/mholt/caddy-l4/modules/l4proxyprotocol"
 	"github.com/mholt/caddy-l4/modules/l4tls"
+	proxyprotocol "github.com/pires/go-proxyproto"
 	"go.uber.org/zap"
 )
 
@@ -217,15 +217,16 @@ func (h *Handler) dialPeers(upstream *Upstream, repl *caddy.Replacer, down *laye
 		// Send the PROXY protocol header.
 		if err == nil {
 			downConn := l4proxyprotocol.GetConn(down)
+			realConn := downConn.(*proxyprotocol.Conn)
+			pp2Hdr := *realConn.ProxyHeader()
+
 			switch h.ProxyProtocol {
 			case "v1":
-				var h proxyprotocol.HeaderV1
-				h.FromConn(downConn, false)
-				_, err = h.WriteTo(up)
+				pp2Hdr.Version = 1
+				_, err = pp2Hdr.WriteTo(up)
 			case "v2":
-				var h proxyprotocol.HeaderV2
-				h.FromConn(downConn, false)
-				_, err = h.WriteTo(up)
+				pp2Hdr.Version = 2
+				_, err = pp2Hdr.WriteTo(up)
 			}
 		}
 

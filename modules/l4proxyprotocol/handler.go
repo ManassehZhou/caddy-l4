@@ -17,12 +17,12 @@ package l4proxyprotocol
 import (
 	"fmt"
 	"net"
-	"sort"
+	"net/netip"
 	"time"
 
 	"github.com/caddyserver/caddy/v2"
-	"github.com/mastercactapus/proxyprotocol"
 	"github.com/mholt/caddy-l4/layer4"
+	proxyprotocol "github.com/pires/go-proxyproto"
 	"go.uber.org/zap"
 )
 
@@ -37,9 +37,9 @@ type Handler struct {
 	Timeout caddy.Duration `json:"timeout,omitempty"`
 
 	// An optional list of CIDR ranges to allow/require PROXY headers from.
-	Allow []string `json:"allow,omitempty"`
-
-	rules  []proxyprotocol.Rule
+	Allow  []string `json:"allow,omitempty"`
+	allow  []netip.Prefix
+	policy proxyprotocol.PolicyFunc
 	logger *zap.Logger
 }
 
@@ -53,55 +53,36 @@ func (Handler) CaddyModule() caddy.ModuleInfo {
 
 // Provision sets up the module.
 func (h *Handler) Provision(ctx caddy.Context) error {
-	for _, s := range h.Allow {
-		_, n, err := net.ParseCIDR(s)
-		if err != nil {
-			return fmt.Errorf("invalid subnet '%s': %w", s, err)
+	if len(h.Allow) != 0 {
+		for _, cidr := range h.Allow {
+			ipnet, err := netip.ParsePrefix(cidr)
+			if err != nil {
+				return err
+			}
+			h.allow = append(h.allow, ipnet)
 		}
-		h.rules = append(h.rules, proxyprotocol.Rule{Timeout: time.Duration(h.Timeout), Subnet: n})
+		h.policy = func(upstream net.Addr) (proxyprotocol.Policy, error) {
+			if network := upstream.Network(); caddy.IsUnixNetwork(network) {
+				return proxyprotocol.REQUIRE, nil
+			}
+
+			host, _, err := net.SplitHostPort(upstream.String())
+			if err != nil {
+				return proxyprotocol.REJECT, err
+			}
+
+			ip, err := netip.ParseAddr(host)
+			for _, ipnet := range h.allow {
+				if ipnet.Contains(ip) {
+					return proxyprotocol.REQUIRE, nil
+				}
+			}
+			return proxyprotocol.REJECT, nil
+		}
 	}
-	h.tidyRules()
 
 	h.logger = ctx.Logger(h)
 	return nil
-}
-
-// tidyRules removes duplicate subnet rules, and use the lowest non-zero timeout.
-//
-// This is basically a copy of `Listener.SetFilter` from the proxyprotocol package.
-func (h *Handler) tidyRules() {
-	rules := h.rules
-	sort.Slice(rules, func(i, j int) bool {
-		iOnes, iBits := rules[i].Subnet.Mask.Size()
-		jOnes, jBits := rules[j].Subnet.Mask.Size()
-		if iOnes != jOnes {
-			return iOnes > jOnes
-		}
-		if iBits != jBits {
-			return iBits > jBits
-		}
-		if rules[i].Timeout != rules[j].Timeout {
-			if rules[j].Timeout == 0 {
-				return true
-			}
-			return rules[i].Timeout < rules[j].Timeout
-		}
-		return rules[i].Timeout < rules[j].Timeout
-	})
-
-	if len(rules) > 0 {
-		// dedup
-		last := rules[0]
-		nf := rules[1:1]
-		for _, f := range rules[1:] {
-			if last.Subnet.String() == f.Subnet.String() {
-				continue
-			}
-
-			last = f
-			nf = append(nf, f)
-		}
-	}
 }
 
 // newConn creates a new connection which will handle the PROXY protocol. It
@@ -109,34 +90,25 @@ func (h *Handler) tidyRules() {
 //
 // This is basically a copy of `Listener.Accept` from the proxyprotocol package.
 func (h *Handler) newConn(cx *layer4.Connection) *proxyprotocol.Conn {
-	nc := func(t time.Duration) *proxyprotocol.Conn {
-		if t == 0 {
-			return proxyprotocol.NewConn(cx, time.Time{})
-		}
-		return proxyprotocol.NewConn(cx, time.Now().Add(t))
-	}
+	var err error
 
-	if len(h.rules) == 0 {
-		return nc(time.Duration(h.Timeout))
-	}
-
-	var remoteIP net.IP
-	switch r := cx.RemoteAddr().(type) {
-	case *net.TCPAddr:
-		remoteIP = r.IP
-	case *net.UDPAddr:
-		remoteIP = r.IP
-	default:
-		return nil
-	}
-
-	for _, r := range h.rules {
-		if r.Subnet.Contains(remoteIP) {
-			return nc(r.Timeout)
+	proxyHeaderPolicy := proxyprotocol.REQUIRE
+	if h.policy != nil {
+		proxyHeaderPolicy, err = h.policy(cx.RemoteAddr())
+		if err != nil {
+			// can't decide the policy, we can't accept the connection
+			cx.Close()
+			return nil
 		}
 	}
 
-	return nil
+	if h.Timeout == 0 {
+		return proxyprotocol.NewConn(cx, proxyprotocol.WithPolicy(proxyHeaderPolicy))
+	}
+
+	return proxyprotocol.NewConn(cx, proxyprotocol.WithPolicy(proxyHeaderPolicy), func(c *proxyprotocol.Conn) {
+		c.SetReadDeadline(time.Now().Add(time.Duration(h.Timeout)))
+	})
 }
 
 // Handle handles the connections.
@@ -150,7 +122,7 @@ func (h *Handler) Handle(cx *layer4.Connection, next layer4.Handler) error {
 		return next.Handle(cx)
 	}
 
-	if _, err := conn.ProxyHeader(); err != nil {
+	if _, err := conn.Read(make([]byte, 0)); err != nil {
 		return fmt.Errorf("parsing the PROXY header: %v", err)
 	}
 	h.logger.Debug("received the PROXY header",

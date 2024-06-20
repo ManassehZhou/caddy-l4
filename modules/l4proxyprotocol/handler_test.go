@@ -121,7 +121,7 @@ func TestProxyProtocolHandleGarbage(t *testing.T) {
 		nextCx = c
 		return nil
 	}))
-	if err == nil || err.Error() != "parsing the PROXY header: invalid signature" {
+	if err == nil || err.Error() != "parsing the PROXY header: proxyproto: proxy protocol signature not present" {
 		t.Fatalf("handler did not return an error or the wrong error -> %s", err)
 	}
 

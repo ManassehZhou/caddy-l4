@@ -4,7 +4,7 @@ go 1.21
 
 require (
 	github.com/caddyserver/caddy/v2 v2.7.6
-	github.com/mastercactapus/proxyprotocol v0.0.4
+	github.com/pires/go-proxyproto v0.7.0
 	github.com/things-go/go-socks5 v0.0.5
 	go.uber.org/zap v1.27.0
 	golang.org/x/crypto v0.21.0
@@ -58,6 +58,7 @@ require (
 	github.com/klauspost/cpuid/v2 v2.2.5 // indirect
 	github.com/libdns/libdns v0.2.1 // indirect
 	github.com/manifoldco/promptui v0.9.0 // indirect
+	github.com/mastercactapus/proxyprotocol v0.0.4 // indirect
 	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/mattn/go-isatty v0.0.19 // indirect
 	github.com/matttproud/golang_protobuf_extensions v1.0.4 // indirect
